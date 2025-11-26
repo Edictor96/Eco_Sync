@@ -1,36 +1,98 @@
-import pandas as pd
-import sqlite3, os
-from sklearn.ensemble import RandomForestRegressor
-import joblib
+# backend/models.py
+import os
+import sqlite3
+from math import ceil
 
-MODEL_FILE='food_predictor.joblib'
-DB=os.path.join(os.path.dirname(__file__), 'db.sqlite')
+DB = os.path.join(os.path.dirname(__file__), 'db.sqlite')
 
-def train_or_load_predictor():
-    if os.path.exists(os.path.join(os.path.dirname(__file__), MODEL_FILE)):
-        return joblib.load(os.path.join(os.path.dirname(__file__), MODEL_FILE))
+def ensure_db():
+    if not os.path.exists(DB):
+        conn = sqlite3.connect(DB)
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS attendance_records(
+            id INTEGER PRIMARY KEY, attendance INTEGER, temp REAL, weekday INTEGER, special INTEGER, servings REAL)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS waste_logs(
+            id INTEGER PRIMARY KEY, date TEXT, dish TEXT, cooked REAL, consumed REAL, wasted REAL)''')
+        conn.commit()
+        conn.close()
+
+def seed_demo():
+    ensure_db()
     conn = sqlite3.connect(DB)
-    try:
-        df = pd.read_sql('SELECT * FROM attendance_records', conn)
-    except Exception:
-        df = pd.DataFrame({'attendance':[100,120,80,150],'temp':[28,30,25,27],'weekday':[1,2,3,4],'special':[0,1,0,0],'servings':[100,120,80,150]})
+    c = conn.cursor()
+    # Check existing
+    c.execute("SELECT COUNT(*) FROM attendance_records")
+    if c.fetchone()[0] > 0:
+        conn.close()
+        return
+    records = [
+        (100,28,1,0,100),
+        (120,30,2,0,120),
+        (80,25,3,0,80),
+        (150,27,4,1,150),
+        (95,29,5,0,95)
+    ]
+    for r in records:
+        c.execute('INSERT INTO attendance_records(attendance,temp,weekday,special,servings) VALUES (?,?,?,?,?)', r)
+    sample = [
+        ('2025-11-10','Rice',10,8,2),
+        ('2025-11-10','Dal',8,7.5,0.5),
+        ('2025-11-11','Rice',12,10,2),
+    ]
+    for s in sample:
+        c.execute('INSERT INTO waste_logs(date,dish,cooked,consumed,wasted) VALUES (?,?,?,?,?)', s)
+    conn.commit()
     conn.close()
-    X = df[['attendance','temp','weekday','special']]
-    y = df['servings']
-    model = RandomForestRegressor(n_estimators=50, random_state=42).fit(X,y)
-    joblib.dump(model, os.path.join(os.path.dirname(__file__), MODEL_FILE))
-    return model
 
-def predict_quantity(attendance, temp, weekday, special):
-    model = train_or_load_predictor()
-    X = [[attendance, temp, weekday, special]]
-    pred = model.predict(X)[0]
-    return max(0, round(pred * 1.02))
+# Simple prediction: use recent average servings per attendance ratio and adjust by temp/weekend/special.
+def predict_quantity(attendance, temp=25.0, weekday=0, special=0):
+    ensure_db()
+    conn = sqlite3.connect(DB)
+    df = []
+    try:
+        c = conn.cursor()
+        c.execute('SELECT attendance, servings FROM attendance_records ORDER BY id DESC LIMIT 30')
+        rows = c.fetchall()
+        for r in rows:
+            if r[0] and r[1]:
+                df.append((r[0], r[1]))
+    except Exception:
+        df = []
+    conn.close()
 
-def optimize_menu_logic(df):
-    df = df.copy()
-    if 'served' not in df.columns or 'waste' not in df.columns:
+    # fallback: 1 serving per person
+    if not df:
+        base_ratio = 1.0
+    else:
+        # average servings/attendance ratio
+        ratios = [srv/att if att else 1.0 for att,srv in df]
+        base_ratio = sum(ratios) / len(ratios)
+
+    # small heuristic adjustments
+    temp_adj = 1.0
+    if temp > 30: temp_adj = 0.95
+    if temp < 20: temp_adj = 1.05
+    weekday_adj = 1.0
+    if weekday in (5,6): weekday_adj = 1.1  # weekend more people
+    special_adj = 1.2 if special else 1.0
+
+    predicted = attendance * base_ratio * temp_adj * weekday_adj * special_adj
+    # round to next integer serving
+    return max(0, int(ceil(predicted)))
+
+# Menu optimizer: simple low-waste sorting
+def optimize_menu_logic(dishes_list):
+    """
+    dishes_list: list of dicts with keys: 'dish', 'served', 'waste'
+    returns list of dish names with lowest waste ratio (top 5)
+    """
+    if not dishes_list:
         return []
-    df['waste_ratio'] = df['waste'] / (df['served'] + 1e-6)
-    best = df.sort_values('waste_ratio').head(5)
-    return best['dish'].tolist()
+    processed = []
+    for d in dishes_list:
+        served = d.get('served', 0) or 0
+        waste = d.get('waste', 0) or 0
+        ratio = (waste / served) if served else 0
+        processed.append((d.get('dish','Unknown'), ratio))
+    processed.sort(key=lambda x: x[1])
+    return [p[0] for p in processed[:5]]
