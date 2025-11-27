@@ -23,7 +23,7 @@ def predict_food():
 
     qty = predict_quantity(attendance=att, temp=temp, weekday=wd, special=special)
 
-    # Log this prediction into attendance history so system "learns" over time
+    # Log this into history so we keep building a dataset
     ensure_db()
     conn = sqlite3.connect(DB)
     c = conn.cursor()
