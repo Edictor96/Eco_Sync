@@ -133,49 +133,59 @@ def _fit_attendance_regression(rows):
 
 def predict_quantity(attendance, temp=25.0, weekday=0, special=0):
     """
-    'Smart' predictor pipeline:
-      1. Train linear regression on (attendance -> servings) from recent history.
-      2. Apply weekday / temperature / special-event adjustments.
-      3. Apply target waste buffer so we cook slightly less than predicted demand.
+    Uses regression coefficients trained in Google Colab (scikit-learn)
+    + contextual multipliers + waste-reduction buffer.
     """
-    rows = _get_history()
 
-    # 1) Learn a & b from history
-    a, b = _fit_attendance_regression(rows)
+    # === 1) Coefficients learned from your Colab notebook ===
+    # servings ≈ a_att*attendance + a_temp*temp + a_weekday*weekday + a_special*special + b
+    a_att     = 0.904785
+    a_temp    = -0.238449
+    a_weekday = 1.120050
+    a_special = 13.181931
+    b         = 6.799092
 
-    # Base demand purely from learned model
-    base_demand = a * attendance + b
-    if base_demand <= 0:
-        base_demand = attendance * 0.95  # safety fallback
+    # Base predicted demand from the trained model
+    demand = (
+        a_att * float(attendance) +
+        a_temp * float(temp) +
+        a_weekday * float(weekday) +
+        a_special * float(special) +
+        b
+    )
 
-    # 2) Contextual adjustments
-    # Temperature
+    # Safety fallback if something weird happens
+    if demand <= 0:
+        demand = float(attendance) * 0.9
+
+    # === 2) Extra contextual tweaks (optional but good to explain in viva) ===
+    # Hot / cold adjustment
     if temp > 32:
-        temp_factor = 0.94   # very hot → people eat a bit less
+        temp_factor = 0.95        # very hot → slightly less appetite
     elif temp < 18:
-        temp_factor = 1.06   # cold → eat slightly more
+        temp_factor = 1.05        # cold → slightly more food
     else:
         temp_factor = 1.0
 
-    # Weekday (0=Sun ... 6=Sat)
-    if weekday in (5, 6):     # Sat/Sun
+    # Weekend bump (0=Sun … 6=Sat; adjust as per your convention)
+    if weekday in (5, 6):         # Sat/Sun
         weekday_factor = 1.08
     else:
         weekday_factor = 1.0
 
-    # Special events
-    special_factor = 1.15 if special else 1.0
+    demand *= temp_factor * weekday_factor
 
-    demand = base_demand * temp_factor * weekday_factor * special_factor
-
-    # 3) Target waste buffer (we aim for ~5–8% buffer, not 0%)
-    target_buffer = 0.93  # cook 93% of demand → rest is natural safety margin
+    # === 3) Waste-reduction buffer ===
+    # We intentionally cook a bit less than raw demand to reduce overcooking.
+    target_buffer = 0.93          # cook ~93% of predicted demand
     recommended = demand * target_buffer
 
-    # Keep results sane: never exceed attendance by too much
-    if recommended > attendance * 1.1:
-        recommended = attendance * 1.1
+    # Hard sanity limit: don't go way above attendance
+    max_allowed = float(attendance) * 1.10
+    if recommended > max_allowed:
+        recommended = max_allowed
 
+    from math import ceil
     return max(0, int(ceil(recommended)))
 
 def optimize_menu_logic(dishes_list):
